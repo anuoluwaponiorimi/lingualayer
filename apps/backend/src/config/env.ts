@@ -16,6 +16,11 @@ const schema = z.object({
 
   JWT_SECRET: z.string().optional(),
   JWT_TTL_SECONDS: z.coerce.number().default(3600),
+
+  // QualityOracle curator leaderboard
+  SOROBAN_RPC_URL: z.string().default("https://soroban-testnet.stellar.org"),
+  QUALITY_ORACLE_CONTRACT_ID: z.string().optional(),
+  LEADERBOARD_CACHE_TTL_MS: z.coerce.number().default(30_000),
 });
 
 const raw = schema.parse(process.env);
@@ -35,4 +40,8 @@ export const config = {
 
   jwtSecret: raw.JWT_SECRET,
   jwtTtlSeconds: raw.JWT_TTL_SECONDS,
+
+  sorobanRpcUrl: raw.SOROBAN_RPC_URL,
+  qualityOracleContractId: raw.QUALITY_ORACLE_CONTRACT_ID,
+  leaderboardCacheTtlMs: raw.LEADERBOARD_CACHE_TTL_MS,
 };
