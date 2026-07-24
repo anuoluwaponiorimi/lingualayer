@@ -8,9 +8,5 @@ members = [
     "contracts/data-commission",
 ]
 
-# The `dataset-registry`, `license-router` and `royalty-splitter` crates declare
-# `soroban-sdk = { workspace = true }`, which requires this table to exist. Pin it
-# to the same 21.0.0 the `data-commission` and `quality-oracle` crates already use
-# so the whole workspace resolves against one SDK version.
 [workspace.dependencies]
-soroban-sdk = "21.0.0"
+soroban-sdk = { version = "25.0.0", features = ["alloc"] }

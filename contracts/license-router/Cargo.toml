@@ -2,7 +2,6 @@
 name = "license-router"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.78"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -12,6 +11,7 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+quality-oracle = { path = "../quality-oracle", features = ["testutils"] }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
