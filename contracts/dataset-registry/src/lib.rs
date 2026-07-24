@@ -1,8 +1,8 @@
 #![cfg_attr(not(test), no_std)]
 #[cfg(not(test))]
-#[macro_use]
 extern crate alloc;
 
+#[cfg(not(test))]
 use alloc::format;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec,
