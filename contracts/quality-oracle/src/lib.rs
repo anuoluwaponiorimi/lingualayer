@@ -1,8 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short,
-    Address, BytesN, Env, String,
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Vec,
 };
 
 const MAX_SCORE: u32 = 100;
@@ -19,6 +18,8 @@ enum StorageKey {
     Curator(Address),
     Attestation(String, Address),
     Quality(String),
+    CuratorList,
+    CuratorStats(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,15 @@ pub enum QualityTier {
     Silver,
     Gold,
     Platinum,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CuratorStats {
+    pub curator: Address,
+    pub attestation_count: u32,
+    pub average_score: u32,
+    pub tier: QualityTier,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +122,17 @@ impl QualityOracle {
         env.storage()
             .instance()
             .set(&symbol_short!("cur_cnt"), &(cnt + 1));
+
+        // Track registration order for the curator leaderboard.
+        let mut curators: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&StorageKey::CuratorList)
+            .unwrap_or(Vec::new(&env));
+        curators.push_back(curator);
+        env.storage()
+            .instance()
+            .set(&StorageKey::CuratorList, &curators);
     }
 
     /// Admin slashes a curator for malicious attestations. Zeroes their stake
@@ -178,7 +199,7 @@ impl QualityOracle {
             rubric_hash,
             ledger: env.ledger().sequence(),
         };
-        let attest_key = StorageKey::Attestation(dataset_id.clone(), curator);
+        let attest_key = StorageKey::Attestation(dataset_id.clone(), curator.clone());
         env.storage().persistent().set(&attest_key, &attest);
         env.storage()
             .persistent()
@@ -209,6 +230,30 @@ impl QualityOracle {
         env.storage()
             .persistent()
             .extend_ttl(&agg_key, 7_776_000, 7_776_000);
+
+        // Update the curator's aggregate stats for the leaderboard.
+        let stats_key = StorageKey::CuratorStats(curator.clone());
+        let mut stats: CuratorStats =
+            env.storage()
+                .persistent()
+                .get(&stats_key)
+                .unwrap_or(CuratorStats {
+                    curator: curator.clone(),
+                    attestation_count: 0,
+                    average_score: 0,
+                    tier: QualityTier::Unrated,
+                });
+
+        let stats_total =
+            stats.average_score as u64 * stats.attestation_count as u64 + score as u64;
+        stats.attestation_count += 1;
+        stats.average_score = (stats_total / stats.attestation_count as u64) as u32;
+        stats.tier = Self::compute_tier(stats.average_score);
+
+        env.storage().persistent().set(&stats_key, &stats);
+        env.storage()
+            .persistent()
+            .extend_ttl(&stats_key, 7_776_000, 7_776_000);
     }
 
     pub fn get_quality(env: Env, dataset_id: String) -> DatasetQuality {
@@ -217,6 +262,27 @@ impl QualityOracle {
             .persistent()
             .get(&agg_key)
             .expect("no quality data")
+    }
+
+    /// Every curator address that has ever called `register_curator`, in registration order.
+    pub fn list_curators(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::CuratorList)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Aggregate activity/reliability stats for one curator, used to build the leaderboard.
+    pub fn get_curator_stats(env: Env, curator: Address) -> CuratorStats {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::CuratorStats(curator.clone()))
+            .unwrap_or(CuratorStats {
+                curator,
+                attestation_count: 0,
+                average_score: 0,
+                tier: QualityTier::Unrated,
+            })
     }
 
     /// Returns the royalty multiplier for `dataset_id` in basis points.
@@ -343,5 +409,95 @@ mod tests {
         let q = client.get_quality(&ds);
         assert_eq!(q.average_score, 80);
         assert_eq!(q.tier, QualityTier::Gold);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::BytesN;
+
+    fn hash(env: &Env, byte: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[byte; 32])
+    }
+
+    #[test]
+    fn list_curators_tracks_registration_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QualityOracle);
+        let client = QualityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &1_000_000);
+
+        let curator_a = Address::generate(&env);
+        let curator_b = Address::generate(&env);
+        client.register_curator(&curator_a, &1_000_000);
+        client.register_curator(&curator_b, &1_000_000);
+
+        let curators = client.list_curators();
+        assert_eq!(curators.len(), 2);
+        assert_eq!(curators.get(0).unwrap(), curator_a);
+        assert_eq!(curators.get(1).unwrap(), curator_b);
+    }
+
+    #[test]
+    fn curator_stats_aggregate_across_datasets() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QualityOracle);
+        let client = QualityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &1_000_000);
+
+        let curator = Address::generate(&env);
+        client.register_curator(&curator, &1_000_000);
+
+        let dataset_a = String::from_str(&env, "yo-proverbs-001");
+        let dataset_b = String::from_str(&env, "sw-news-002");
+
+        client.attest_quality(&curator, &dataset_a, &80, &hash(&env, 1));
+        client.attest_quality(&curator, &dataset_b, &60, &hash(&env, 2));
+
+        let stats = client.get_curator_stats(&curator);
+        assert_eq!(stats.attestation_count, 2);
+        assert_eq!(stats.average_score, 70);
+        assert_eq!(stats.tier, QualityTier::Gold);
+    }
+
+    #[test]
+    fn curator_stats_defaults_for_unknown_curator() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QualityOracle);
+        let client = QualityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &1_000_000);
+
+        let stranger = Address::generate(&env);
+        let stats = client.get_curator_stats(&stranger);
+        assert_eq!(stats.attestation_count, 0);
+        assert_eq!(stats.average_score, 0);
+        assert_eq!(stats.tier, QualityTier::Unrated);
+    }
+
+    #[test]
+    #[should_panic(expected = "curator already registered")]
+    fn register_curator_twice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, QualityOracle);
+        let client = QualityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin, &1_000_000);
+
+        let curator = Address::generate(&env);
+        client.register_curator(&curator, &1_000_000);
+        client.register_curator(&curator, &1_000_000);
     }
 }
